@@ -1,0 +1,23 @@
+{
+  "dataset": "D:/Datasets/WorldSense",
+  "model": "D:/Models/Qwen2.5-Omni-3B",
+  "limit": 20,
+  "offset": 0,
+  "video_id": null,
+  "tasks": null,
+  "task_domain": null,
+  "task_type": null,
+  "short_only": false,
+  "max_duration": 35,
+  "max_frames": 24,
+  "max_pixels": 100352,
+  "fps": 2.0,
+  "max_new_tokens": 16,
+  "use_audio_in_video": true,
+  "do_sample": false,
+  "load_in_4bit": false,
+  "gpu_memory": "5GiB",
+  "cpu_memory": "24GiB",
+  "attn_implementation": "sdpa",
+  "output": null
+}
