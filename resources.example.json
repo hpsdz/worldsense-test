@@ -1,0 +1,5 @@
+{
+  "audioclip": "resources/AudioCLIP-Full-Training.pt",
+  "clip_model": "resources/clip-vit-large-patch14-336",
+  "nltk_data": "assets/nltk_data"
+}

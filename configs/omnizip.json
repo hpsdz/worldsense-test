@@ -1,0 +1,9 @@
+{
+  "compression_method": "omnizip",
+  "compression_params": {
+    "rho_audio": 0.4,
+    "rho_video": 0.6,
+    "g": 3,
+    "contextual_ratio": 0.05
+  }
+}

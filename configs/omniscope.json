@@ -1,0 +1,9 @@
+{
+  "compression_method": "omniscope",
+  "compression_params": {
+    "visual_prune_ratio": 0.6,
+    "audio_prune_ratio": 0.25,
+    "clip_device": "cpu",
+    "clip_batch_size": 4
+  }
+}

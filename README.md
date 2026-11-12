@@ -1,6 +1,14 @@
 # Qwen2.5-Omni 本地 WorldSense 评测
 
+统一策略支持 baseline、OmniZip、OmniSelect、random、OmniPack 和 OmniScope。
+OmniScope 使用 `python app.py --config configs/omniscope.json`，额外权重与参数见 [接入说明](docs/methods/omniscope.md)。
+
 默认从 `D:\Datasets\WorldSense` 读取视频和选择题，模型路径为 `D:\Models\Qwen2.5-Omni-3B`。
+
+## 辅助模型资源
+
+将 `resources.example.json` 复制为 `resources.local.json`，集中设置 AudioCLIP、CLIP 和 NLTK 路径。
+方法配置无需包含本机绝对路径。资源迁移、环境变量与 Git 历史注意事项见 [资源说明](docs/RESOURCES.md)。
 
 ## 启动
 
@@ -51,7 +59,7 @@ python app.py --config experiment.json --check-data
 
 `fps` 是目标采样频率，仍受 `max_frames` 上限限制；`use_audio_in_video` 控制输入音轨，`do_sample` 控制是否随机生成。`gpu_memory`、`cpu_memory` 是权重放置预算；`attn_implementation` 默认 `sdpa`。可用 `--no-short-only`、`--no-use-audio-in-video`、`--no-do-sample` 覆盖配置中的布尔开关。结果 JSON 的 `config.effective_parameters` 保存最终生效参数。未知字段或类型错误会在加载模型前报错。
 
-使用已有的 `omnizip` 环境，默认运行标注顺序中的第一道题：
+使用已有的 `omnizip` 环境，按 config.json 的筛选和题数运行：
 
 ```powershell
 conda activate omnizip
@@ -64,7 +72,7 @@ python app.py
 conda run --no-capture-output -n omnizip python app.py --limit 3
 ```
 
-IDE 的解释器应选择 `C:\Users\wyz\.conda\envs\omnizip\python.exe`。base 环境未安装 torch，但支持数据检查和单元测试。
+IDE 的解释器应选择 `C:\Users\wyz\.conda\envs\omnizip\python.exe`。请使用安装了 requirement.txt 的解释器运行测试；编辑器提示无法解析 nltk 时也应先核对解释器。
 
 ## 数据格式
 
@@ -121,11 +129,11 @@ python app.py --limit 0
 # 更换数据集或模型目录
 python app.py --dataset D:\Datasets\WorldSense --model D:\Models\Qwen2.5-Omni-3B
 
-# 不需要模型依赖的单元测试
-python -m unittest -v test_app
+# 回归测试（使用已安装项目依赖的环境）
+python -m unittest discover -s tests -v
 ```
 
-`--limit` 按题计数，默认 1，0 表示所有剩余题目；`--offset` 从 0 开始，在视频筛选之后应用。不指定输出路径时，会在项目 `results/` 下创建带时间戳的 JSON。已有结果文件不会被覆盖，请换用新的文件名。程序每完成一题就保存一次，包含原始回答、预测选项、标准答案、正确性、耗时、运行参数和汇总。准确率分母包含已处理的失败题和无法解析的题，未处理的题不会纳入分母。错误和未解析答案会导致最终退出码非零；正常运行但答错不会导致非零退出码。
+`--limit` 按题计数，默认值由 config.json 决定，0 表示所有剩余题目；`--offset` 从 0 开始，在视频筛选之后应用。不指定输出路径时，会在项目 `results/` 下创建带时间戳的 JSON。已有结果文件不会被覆盖，请换用新的文件名。程序每完成一题就保存一次，包含原始回答、预测选项、标准答案、正确性、耗时、运行参数和汇总。准确率分母包含已处理的失败题和无法解析的题，未处理的题不会纳入分母。错误和未解析答案会导致最终退出码非零；正常运行但答错不会导致非零退出码。
 
 `--short-only` 使用 JSON 中的 `video_duration` 秒数筛选完整视频，因此不会把同一视频的题目拆开。按数据集标注值，该子集包含 39 个视频、78 道题；`--short-only --limit 0` 会完整评测这个子集。标注时长以整秒记录，若需要按解码后的精确时长筛选，应先使用前面的全量时长统计脚本核对边界样本。`--check-data` 只校验数据和筛选结果，不加载模型。
 
@@ -162,8 +170,153 @@ python app.py --no-load-in-4bit --limit 1 --output results/full_precision_sample
 
 当前已验证环境沿用 PyTorch 2.6.0+cu124 和 Transformers 4.52.3，以及现有环境的 qwen_omni_utils。
 
-## 本地模型修改
+## 共享模型和目录
 
-`app.py` 从项目内的 `modeling_qwen2_5_omni.py` 导入 `Qwen2_5OmniForConditionalGeneration`。该文件包含可直接修改的模型实现，包括 Thinker、视觉编码器、音频编码器、注意力及生成逻辑；配置类、公共工具和 `Qwen2_5OmniProcessor` 仍来自 Transformers。
+app.py 直接导入 models/qwen2_5_omni/modeling_qwen2_5_omni.py；根目录不再保留同名转发文件。
+后续模型修改集中在该共享实现。配置类和 Processor 仍来自 Transformers 4.52.3，不建议单独升级。
 
-本地实现以当前环境的 Transformers 4.52.3 模型文件（含环境中已有修复）为基础，将包内相对导入改为绝对导入；没有修改环境安装目录。原来的较新版本文件依赖当前环境缺少的内部接口，已备份为 `modeling_qwen2_5_omni.py.original.bak`。许可证保留在源码中。后续修改本地模型文件后，重新启动测试进程即可生效；升级 Transformers 时需重新检查接口兼容性。
+- app.py：统一评测入口；config.json 和 configs/：公共及方法参数。
+- models/：共享模型；compression/：策略适配和核心算法。
+- tests/：必要的回归测试，不是数据集运行入口。
+- docs/methods/：方法专用说明；docs/history/：历史迁移记录。
+- docs/upstream/：上游说明和许可证；docs/legacy/：旧源码与历史资料。
+- vendor/：第三方依赖；assets/：运行资源；results/：实验结果。
+
+文档导航见 [docs/README.md](docs/README.md)。第三方目录中的 README 和许可证保留原位置，以满足包构建和来源追溯。
+
+## 统一压缩评测
+
+baseline、OmniZip、OmniSelect、random、OmniPack、OmniScope 共用
+`models/qwen2_5_omni/modeling_qwen2_5_omni.py`、本地模型权重、vendor
+预处理库、问题模板、生成参数与评分器。app.py 直接导入共享模型。
+统一评测不再依赖 OmniZip-main/OmniSelect 旧目录。
+
+## 运行
+
+在 qwen 根目录、现有 omnizip 环境运行：
+
+```powershell
+python app.py --config configs/baseline.json
+python app.py --config configs/omnizip.json
+python app.py --config configs/omniselect.json
+python app.py --config configs/random.json
+python app.py --config configs/omnipack.json
+python app.py --config configs/omniscope.json
+```
+
+这些配置叠加到根目录 config.json，保留其现有帧数、时长筛选、题数等设置。
+压缩参数是整体替换的 JSON 对象，遗漏参数使用策略默认值。也可以直接指定：
+
+```powershell
+python app.py --compression-method omnizip --compression-params '{"rho_audio":0.4,"rho_video":0.6}'
+python app.py --config configs/omniselect.json --video-id FnOIAada --tasks task0 task1 --max-frames 16 --max-new-tokens 4
+```
+
+OmniSelect 需要已下载的 AudioCLIP 权重、词表和 NLTK 资源，详见
+`docs/legacy/OmniSelect.md`（历史记录）；权重通过 `resources.local.json` 配置，词表位于 `vendor/audioclip/assets/`，
+NLTK 资源位于 `assets/nltk_data/`。默认 AudioCLIP 在 CPU 上逐题加载计算，避免与
+Qwen 争用 8 GB GPU 显存；配置 compression_params.audioclip_device 可改变设备。
+这种部署不是论文性能配置。辅助模型的加载和计算均计入策略准备耗时及总耗时。
+
+### 随机删除对照
+
+`configs/random.json` 选择 `random` 策略。`prune_ratio_v` 和 `prune_ratio_a`
+分别表示视频和音频删除比例，范围 [0,1)，默认 0.6 / 0.4；设为 0 可保留该模态。
+每个模态全序列均匀无放回抽取 `floor(token数 × 删除比例)` 个位置删除，
+不分时间组，不合并 embedding，不改变剩余 token 顺序，保留所有文本与特殊 token。
+因向下取整，实际删除率可能略低于配置值；总序列删除率还取决于不删除的文本比例。
+
+`seed` 默认 0，范围为 [0,2**63) 的整数。每次调用重建独立 CPU 随机生成器，
+视频和音频使用不同随机流，不修改 PyTorch 全局随机状态，不依赖题目处理顺序。
+相同种子、相同模态 token 数将得到相同模态内删除位置（即使问题不同）；
+要评估随机波动，使用多个 seed 分别运行。它不计算音频重要性，也不运行 AudioCLIP。
+其余缓存处理、输入限制、耗时和 token 统计共用现有统一流程。
+
+## 结构与扩展
+
+OmniScope 的额外 CLIP 权重、参数及与上游的适配差异见 [docs/methods/omniscope.md](docs/methods/omniscope.md)。
+
+- app.py：数据筛选、统一预处理、策略准备、推理和结果保存。
+- compression/strategies.py：注册表、策略接口、基础策略适配器。
+- compression/algorithms/：从各上游实现提取的压缩算法，不含 Qwen 网络。
+- compression/relevance.py：OmniSelect AudioCLIP 查询相关性与实际 token 分组对齐。
+- compression/runtime.py：按需提取音频重要性、应用压缩结果、缓存位置适配。
+- models/qwen2_5_omni/modeling_qwen2_5_omni.py：共享模型，调用压缩接口。
+- compression/omnipack.py：OmniPack 两阶段适配、编码器注意力统计与缓存对齐。
+- compression/algorithms/omnipack/：上游的两阶段选择与合并算法。
+
+新方法继承 Strategy，用 @register_strategy('method_name') 注册，并在策略模块
+导入其实现。定义 defaults、prepare(**kwargs)、compress(...)：
+
+1. prepare 接收同一份采样帧、16 kHz 音频、问题和 Processor 输出；可返回辅助信息。
+2. 如需音频重要性，设置 needs_audio_importance=True；baseline 不计算此项。
+3. compress 返回 CompressionResult：完整长度的 embedding（允许合并）与布尔保留 mask。
+4. 公共运行时负责筛选 embedding/mask/位置并统计 token；要求所有文本与特殊 token 保留。
+
+Strategy.compress 合同是 **语言模型输入前的压缩**。OmniPack 另外使用共享 TextModel
+的层后调用完成第二阶段，并同步裁剪所有已计算层的 KV 缓存。其他层内方法应参照此适配，
+不要把第二阶段移到输入处。KV 驱逐、多视频、多样本 batch 需要额外接口。
+当前压缩适配器限推理、单视频、无 padding、音视频
+同时存在、SDPA、DynamicCache。baseline 保留原有输入能力。4-bit 开关仍可用，
+但本轮没有验证压缩与 4-bit 的组合。
+
+## 位置和算法说明
+
+预填充保留原多模态 RoPE 语义位置；KV 的物理存储位置压缩为连续位置。
+生成阶段保留原始语义时间尺度，裁剪原提示词 mask，并修正物理 cache_position。
+每题重置压缩 mask、重要性和统计，避免上一题污染下一题。
+
+音频重要性采用原项目的全局 Q/K 分块 softmax 汇总方式；它并非修改编码器
+实际 attention mask。通过临时 hook 提取最后一层输入，再执行共享编码器。
+当前每两项重要性平均池化；与实际音频输出长度不匹配时明确报错，不静默截断。
+
+OmniSelect 使用此前本地 demo 的时间组修复，包括稀疏帧与音视频交错产生的碎片组。
+OmniZip 保留其原算法的预算分配，因此相同名义压缩率不等于相同实际 token 数。
+缓存修正可能改变相对旧 demo 的生成结果；本实现不是逐字复刻原脚本输出。
+
+## 统计与验证
+
+每题保留原 input_tokens，并新增 compression_tokens（各模态 before/after）、
+strategy_prepare_seconds、generation_seconds、generated_tokens、sampled_frames、
+sampled_fps、peak_cuda_allocated_bytes；summary.compression 给出已测题目的平均数。
+失败题保留原错误机制，不以 baseline 数据替代失败压缩结果。
+
+elapsed_seconds 包括预处理、策略准备、生成、解码；generation_seconds 包括 Qwen
+编码、重要性提取、压缩、预填充和解码，不含外部 AudioCLIP。
+显存是当前 CUDA 设备 PyTorch allocated 峰值，不是多卡总量或整卡占用。
+
+### 全局和平均耗时
+
+新运行的结果在 `summary.timing` 中保存：
+
+- `global.model_load_seconds`：Qwen 模型及 Processor 加载与设备同步。
+- `global.evaluation_wall_seconds`：初次结果保存开始，到最后一题保存、清理及设备同步结束。
+- `global.run_wall_seconds`：进入 main 到上述结束点，包含参数解析、数据验证、依赖导入、模型加载及评测。
+- `global.finalized`：逐题检查点为 false，正常结束（包括已捕获的单题失败）为 true。
+- `all_processed` / `completed`：分别汇总所有已处理题目，以及无推理异常的题目
+  （包括 invalid_answer）；各字段提供 count、missing_count、total_seconds、mean_seconds、median_seconds。
+
+汇总字段包括 elapsed_seconds（每题端到端）、strategy_prepare_seconds（策略准备）和
+generation_seconds（Qwen 编码、压缩、预填充与生成）。缺失阶段不按零计入平均值；空集合为 null。
+单题耗时保留浮点精度，不再先四舍五入至两位小数。策略准备已完成但后续生成失败时，保留准备耗时。
+
+全局耗时不包括 Python 启动及 main 之前的模块导入、最终汇总文件的写入/打印和进程退出。
+这是明确截止点的墙钟时间，不是逐题耗时之和。中断时已有文件仅包含最近检查点的时间；旧结果
+没有全局字段，不能从逐题耗时反推出完整全局时间。模型加载失败、check-data 模式不生成评测报告。
+
+已用 FnOIAada/task0、task1（16 帧、最多生成 4 token）分别完成三种方法的真实推理，
+每种连续两题，无异常和无效回答。平均 token：
+
+| 策略 | 视频 | 音频 | Query | 总计 |
+|---|---:|---:|---:|---:|
+| baseline | 1152 | 600 | 126.5 | 1878.5 |
+| OmniZip | 709 | 390 | 126.5 | 1225.5 |
+| OmniSelect | 459 | 360 | 126.5 | 945.5 |
+
+结果位于 results/unified_*_validation.json。两题仅为接入验证，不能据此比较准确率。
+运行 `python -m unittest discover -s tests -v` 检查配置、原评测功能、
+策略边界和物理缓存/语义位置对齐。
+
+另外使用相同随机权重的小型 Thinker、显式位置编号对比改造前后 baseline，
+得到逐元素完全相同的 logits；该数值检查是文本路径检查，不是全模型多模态
+全数据集等价性证明。原始音视频编码器和权重结构未改写。

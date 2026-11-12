@@ -18,6 +18,12 @@ audioread==3.1.0
 soundfile==0.14.0
 requests==2.34.2
 packaging==26.3
+# OmniSelect AudioCLIP inference dependencies.
+nltk==3.10.3
+ftfy==6.3.1
+scipy==1.15.3
+termcolor==3.3.0
+regex==2026.9.10
 # Required when load_in_4bit=true.
 bitsandbytes==0.50.2
 # Snapshot of the locally modified preprocessing package, not the PyPI build.

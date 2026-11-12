@@ -1942,7 +1942,7 @@ class Qwen2_5OmniThinkerTextModel(Qwen2_5OmniPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
+        for layer_idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1971,6 +1971,16 @@ class Qwen2_5OmniThinkerTextModel(Qwen2_5OmniPreTrainedModel):
                 )
 
             hidden_states = layer_outputs[0]
+
+            owner_ref = getattr(self, '_compression_owner', None)
+            owner = owner_ref() if owner_ref is not None else None
+            if (owner is not None and getattr(owner, 'compression_method', None) == 'omnipack'
+                    and hidden_states.shape[1] > 1 and cache_position[0] == 0
+                    and layer_idx + 1 == owner.compression_strategy.params['stage2_layer']):
+                from compression.omnipack import stage2
+                hidden_states, causal_mask, position_ids, position_embeddings, cache_position, past_key_values = stage2(
+                    owner, hidden_states, causal_mask, position_ids, position_embeddings,
+                    cache_position, past_key_values, layer_idx)
 
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
@@ -2217,6 +2227,10 @@ class Qwen2_5OmniThinkerForConditionalGeneration(Qwen2_5OmniPreTrainedModelForCo
         image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
         return image_embeds
 
+    def compress_multimodal_tokens(self, *args):
+        from compression.runtime import compress
+        return compress(self, *args)
+
     def get_audio_features(
         self,
         input_features: torch.FloatTensor,
@@ -2357,14 +2371,21 @@ class Qwen2_5OmniThinkerForConditionalGeneration(Qwen2_5OmniPreTrainedModelForCo
             # 1. Extract the input embeddings
             inputs_embeds = self.get_input_embeddings()(input_ids)
 
+        is_prefill = input_ids is not None and input_ids.shape[1] != 1
+        if is_prefill:
+            self._compression_keep = None
+            self.last_compression_stats = None
+            self._audio_importance = None
+
         # 2. Merge text , audios , image and video
         if input_ids is not None and input_ids.shape[1] != 1:  # Prefill stage
             if input_features is not None:
-                audio_features = self.get_audio_features(
+                from compression.runtime import encode_audio
+                audio_features = encode_audio(self, lambda: self.get_audio_features(
                     input_features,
                     feature_attention_mask=feature_attention_mask,
                     audio_feature_lengths=audio_feature_lengths,
-                )
+                ))
                 audio_mask = (
                     (input_ids == self.config.audio_token_id)
                     .unsqueeze(-1)
@@ -2386,7 +2407,11 @@ class Qwen2_5OmniThinkerForConditionalGeneration(Qwen2_5OmniPreTrainedModelForCo
                 inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
             if pixel_values_videos is not None:
-                video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
+                if getattr(self, 'compression_method', None) == 'omnipack':
+                    from compression.omnipack import encode_video
+                    video_embeds = encode_video(self, pixel_values_videos, video_grid_thw)
+                else:
+                    video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
                 video_mask = (
                     (input_ids == self.config.video_token_id)
                     .unsqueeze(-1)
@@ -2429,6 +2454,16 @@ class Qwen2_5OmniThinkerForConditionalGeneration(Qwen2_5OmniPreTrainedModelForCo
                 position_ids = position_ids.view(1, -1).expand(batch_size, -1)
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+        if is_prefill:
+            import weakref
+            self.model._compression_owner = weakref.ref(self)
+            inputs_embeds, attention_mask, position_ids, cache_position = self.compress_multimodal_tokens(
+                input_ids, inputs_embeds, attention_mask, position_ids, video_grid_thw,
+                cache_position, past_key_values, labels)
+        else:
+            from compression.runtime import compact_decode
+            attention_mask, cache_position = compact_decode(self, attention_mask, cache_position)
 
         outputs = self.model(
             attention_mask=attention_mask,

@@ -7,8 +7,12 @@ import math
 import re
 import sys
 import time
+import statistics
 from datetime import datetime
 from pathlib import Path
+
+# Pin all strategies to one preprocessing snapshot.
+sys.path.insert(0, str(Path(__file__).parent / "vendor/qwen-omni-utils/src"))
 
 DEFAULT_CONFIG = Path(__file__).with_name("config.json")
 SYSTEM_PROMPT = (
@@ -25,15 +29,17 @@ def load_config(path):
         raise ValueError("Config must be a JSON object")
     integers = {"limit", "offset", "max_frames", "max_pixels", "max_new_tokens"}
     booleans = {"short_only", "use_audio_in_video", "do_sample", "load_in_4bit"}
-    strings = {"dataset", "model", "gpu_memory", "cpu_memory", "attn_implementation"}
+    strings = {"dataset", "model", "gpu_memory", "cpu_memory", "attn_implementation", "compression_method"}
     nullable_strings = {"video_id", "output"}
     lists = {"tasks", "task_domain", "task_type"}
-    allowed = integers | booleans | strings | nullable_strings | lists | {"fps", "max_duration"}
+    allowed = integers | booleans | strings | nullable_strings | lists | {"fps", "max_duration", "compression_params"}
     for key, value in data.items():
         if key not in allowed:
             raise ValueError(f"Unknown config key: {key}")
         valid = True
-        if key in integers:
+        if key == "compression_params":
+            valid = isinstance(value, dict)
+        elif key in integers:
             valid = type(value) is int
         elif key in booleans:
             valid = type(value) is bool
@@ -57,6 +63,9 @@ def load_config(path):
     for key in ("dataset", "model", "output"):
         if data.get(key) is not None:
             data[key] = str((path.parent / data[key]).resolve())
+    for key in ("audioclip", "clip_model", "nltk_data"):
+        if "compression_params" in data and key in data["compression_params"]:
+            data["compression_params"][key] = str((path.parent / data["compression_params"][key]).resolve())
     return data
 
 
@@ -200,7 +209,60 @@ def summarize_input_tokens(results):
     }
 
 
-def save_results(path, config, results, selected_count):
+def summarize_compression(results):
+    measured = [r["compression_tokens"] for r in results if r.get("compression_tokens")]
+    stages = ["before", "after"]
+    if measured and all("after_stage1" in r["total_tokens"] for r in measured):
+        stages.insert(1, "after_stage1")
+    return {"measured":len(measured), "averages": {
+        key: {stage:sum(r[key][stage] for r in measured)/len(measured) for stage in stages}
+        for key in ("video_tokens","audio_tokens","query_tokens","total_tokens")
+    } if measured else {}}
+
+
+class RunTiming:
+    """Wall-clock snapshots; final report writing is outside the measured interval."""
+    def __init__(self):
+        self.started = time.perf_counter()
+        self.evaluation_started = None
+        self.model_load_seconds = None
+
+    def snapshot(self, finalized=False):
+        now = time.perf_counter()
+        return {
+            "run_wall_seconds": now - self.started,
+            "model_load_seconds": self.model_load_seconds,
+            "evaluation_wall_seconds": (now - self.evaluation_started
+                                        if self.evaluation_started is not None else None),
+            "finalized": finalized,
+        }
+
+
+def summarize_timing(results, timing=None):
+    fields = ("elapsed_seconds", "strategy_prepare_seconds", "generation_seconds")
+    def aggregate(rows):
+        summary = {}
+        for field in fields:
+            values = [r[field] for r in rows if type(r.get(field)) in (int, float)
+                      and math.isfinite(r[field]) and r[field] >= 0]
+            summary[field] = {
+                "count": len(values), "missing_count": len(rows) - len(values),
+                "total_seconds": sum(values) if values else None,
+                "mean_seconds": statistics.mean(values) if values else None,
+                "median_seconds": statistics.median(values) if values else None,
+            }
+        return summary
+    return {
+        "unit": "seconds",
+        "global": timing or {"run_wall_seconds": None, "model_load_seconds": None,
+                             "evaluation_wall_seconds": None, "finalized": False},
+        "all_processed": aggregate(results),
+        "completed": aggregate([r for r in results if r.get("status") in ("ok", "invalid_answer")]),
+        "scope": "Run: main entry through final cleanup; evaluation: initial checkpoint through final cleanup, including per-question saves. Both exclude final report write/printing and process teardown. Completed excludes inference errors, includes invalid answers. Missing phase times are excluded, not zero-filled.",
+    }
+
+
+def save_results(path, config, results, selected_count, timing=None):
     correct = sum(r["correct"] for r in results)
     report = {
         "config": config,
@@ -215,6 +277,8 @@ def save_results(path, config, results, selected_count):
             "accuracy_by_task_domain": accuracy_by(results, "task_domain"),
             "accuracy_by_task_type": accuracy_by(results, "task_type"),
             "input_tokens": summarize_input_tokens(results),
+            "compression": summarize_compression(results),
+            "timing": summarize_timing(results, timing),
         },
         "results": results,
     }
@@ -247,12 +311,45 @@ def infer(sample, args, model, processor, torch, process_mm_info, result=None):
     if result is not None:
         result["input_tokens"] = token_counts
     print(f"Input tokens: {json.dumps(token_counts)}", flush=True)
+    strategy = model.thinker.compression_strategy
+    model.thinker.compression_context = None
+    model.thinker.last_compression_stats = None
+    preparation_start = time.perf_counter()
+    prepare_kwargs = {"tokenizer": processor.tokenizer, "candidates": sample["candidates"]} if args.compression_method == "omniscope" else {}
+    model.thinker.compression_context = strategy.prepare(
+        frames=videos[0], audio=audios[0] if audios else None, question=sample["question"],
+        inputs=inputs, audio_id=model.thinker.config.audio_token_id, video_id=model.thinker.config.video_token_id,
+        **prepare_kwargs)
+    preparation_seconds = time.perf_counter()-preparation_start
+    if result is not None:
+        result["strategy_prepare_seconds"] = preparation_seconds
     inputs = inputs.to(model.device).to(model.dtype)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+    generation_start = time.perf_counter()
     with torch.inference_mode():
         text_ids = model.generate(
             **inputs, use_audio_in_video=args.use_audio_in_video, return_audio=False,
             thinker_do_sample=args.do_sample, thinker_max_new_tokens=args.max_new_tokens,
         )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    generation_seconds = time.perf_counter()-generation_start
+    if result is not None:
+        stats = model.thinker.last_compression_stats
+        if args.compression_method != "baseline" and stats is None:
+            raise RuntimeError("Selected compression strategy did not execute")
+        result["compression_tokens"] = stats or {k:{"before":v,"after":v} for k,v in token_counts.items()}
+        result["strategy_prepare_seconds"] = preparation_seconds
+        result["generation_seconds"] = generation_seconds
+        result["generated_tokens"] = text_ids.shape[1]-inputs.input_ids.shape[1]
+        result["peak_cuda_allocated_bytes"] = torch.cuda.max_memory_allocated() if torch.cuda.is_available() else None
+        result["sampled_frames"] = int(videos[0].shape[0])
+        result["sampled_fps"] = video_kwargs["fps"][0]
+        context = model.thinker.compression_context
+        if context and "video_first" in context:
+            result["modality_priority"] = context["video_first"]
     return processor.batch_decode(
         text_ids[:, inputs.input_ids.shape[1]:], skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
@@ -310,6 +407,8 @@ def parse_args(argv=None):
     parser.add_argument("--gpu-memory")
     parser.add_argument("--cpu-memory")
     parser.add_argument("--attn-implementation", choices=["sdpa", "eager", "flash_attention_2"])
+    parser.add_argument("--compression-method", default="baseline")
+    parser.add_argument("--compression-params", type=json.loads, default={})
     # Read config before parsing the full CLI; explicit CLI arguments win.
     probe = argparse.ArgumentParser(add_help=False)
     probe.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -322,6 +421,11 @@ def parse_args(argv=None):
     except (OSError, ValueError) as exc:
         parser.error(f"Invalid config: {exc}")
     args = parser.parse_args(argv)
+    from compression import create_strategy
+    try:
+        create_strategy(args.compression_method, args.compression_params)
+    except (ValueError, TypeError) as exc:
+        parser.error(str(exc))
     args.config = config_path
     # Config paths are relative to that config; CLI paths retain shell semantics.
     for key in ("dataset", "model", "output"):
@@ -342,6 +446,7 @@ def parse_args(argv=None):
 
 
 def main():
+    run_timing = RunTiming()
     parser, args = parse_args()
     samples, video_count = load_dataset(args.dataset)
     print(f"WorldSense: {video_count} videos, {len(samples)} questions; all video paths and annotations validated.", flush=True)
@@ -381,27 +486,47 @@ def main():
     try:
         import torch
         import transformers
-        from modeling_qwen2_5_omni import Qwen2_5OmniForConditionalGeneration
+        from models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniForConditionalGeneration
         from transformers import Qwen2_5OmniProcessor
         from qwen_omni_utils import process_mm_info
     except ModuleNotFoundError as exc:
         raise SystemExit(f"Missing dependency: {exc.name}. Run: conda run --no-capture-output -n omnizip python app.py") from exc
 
+    from compression import create_strategy
+    strategy = create_strategy(args.compression_method, args.compression_params)
+    from compression.resources import resource_path
+    for resource in ("audioclip", "clip_model", "nltk_data"):
+        if resource in strategy.params:
+            strategy.params[resource] = resource_path(resource, strategy.params[resource])
+    if args.compression_method != "baseline" and (not args.use_audio_in_video or args.attn_implementation != "sdpa"):
+        parser.error("Compressed inference currently requires audio and SDPA")
+    torch.set_num_threads(4)
+    torch.manual_seed(0)
     print("Loading model...", flush=True)
     model_source = str(Path(inspect.getfile(Qwen2_5OmniForConditionalGeneration)).resolve())
     print(f"Model implementation: {model_source}", flush=True)
     quantization_config = build_quantization_config(args.load_in_4bit)
     quantization_kwargs = {"quantization_config": quantization_config} if quantization_config else {}
+    model_load_start = time.perf_counter()
     model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
         str(args.model), torch_dtype="auto", device_map="auto",
         max_memory={0: args.gpu_memory, "cpu": args.cpu_memory} if torch.cuda.is_available() else None,
         attn_implementation=args.attn_implementation, enable_audio_output=False, local_files_only=True,
         **quantization_kwargs,
     ).eval()
+    model.thinker.compression_strategy = strategy
+    model.thinker.compression_method = args.compression_method
+    model.thinker.compression_context = None
     if args.load_in_4bit and not getattr(model, "is_loaded_in_4bit", False):
         raise RuntimeError("4-bit was requested but model did not load in 4-bit mode.")
     processor = Qwen2_5OmniProcessor.from_pretrained(str(args.model), local_files_only=True)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    run_timing.model_load_seconds = time.perf_counter() - model_load_start
     config = {
+        "compression": {"method":args.compression_method, "params":strategy.params,
+                        "implementation":"local-adapted-v1", "cache":"compact DynamicCache with original RoPE positions"},
+        "preprocessing_source": inspect.getfile(process_mm_info),
         "quantization": quantization_config.to_dict() if quantization_config else None,
         "is_loaded_in_4bit": bool(getattr(model, "is_loaded_in_4bit", False)),
         "token_count_definition": "Count non-padding processed input_ids. Video/audio count expanded modality placeholders; query is all remaining input tokens, including system prompt, question, options, instructions and template/modality boundary tokens. Excludes generated output.",
@@ -420,7 +545,8 @@ def main():
         "evaluation": "local low-memory sample evaluation, not the official benchmark protocol",
     }
     results = []
-    save_results(output, config, results, len(samples))
+    run_timing.evaluation_started = time.perf_counter()
+    save_results(output, config, results, len(samples), run_timing.snapshot())
     for index, sample in enumerate(samples, 1):
         print(f"[{index}/{len(samples)}] {sample['video_id']}/{sample['task_id']}: {sample['question']}", flush=True)
         start = time.perf_counter()
@@ -434,13 +560,16 @@ def main():
         except Exception as exc:
             result.update(status="error", error=f"{type(exc).__name__}: {exc}")
             print(result["error"], flush=True)
-        result["elapsed_seconds"] = round(time.perf_counter() - start, 2)
+        result["elapsed_seconds"] = time.perf_counter() - start
         results.append(result)
-        summary = save_results(output, config, results, len(samples))
+        summary = save_results(output, config, results, len(samples), run_timing.snapshot())
         print(f"Prediction={result['prediction']}, gold={sample['answer']}, correct={result['correct']}, status={result['status']}", flush=True)
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    summary = save_results(output, config, results, len(samples), run_timing.snapshot(finalized=True))
     print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
     print(f"Results: {output}", flush=True)
     return 1 if summary["errors"] or summary["invalid_answers"] else 0

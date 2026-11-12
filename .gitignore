@@ -1,0 +1,13 @@
+results
+tests
+assets
+__pycache__
+*.py[cod]
+.DS_Store
+/resources.local.json
+/resources/
+*.pt
+*.pth
+*.safetensors
+pytorch_model*.bin
+*.incomplete
