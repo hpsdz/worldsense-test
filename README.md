@@ -10,6 +10,66 @@ OmniScope 使用 `python app.py --config configs/omniscope.json`，额外权重�
 将 `resources.example.json` 复制为 `resources.local.json`，集中设置 AudioCLIP、CLIP 和 NLTK 路径。
 方法配置无需包含本机绝对路径。资源迁移、环境变量与 Git 历史注意事项见 [资源说明](docs/RESOURCES.md)。
 
+### 各方法需要哪些资源
+
+所有方法都需要在 `config.json` 中设置 `model`（Qwen2.5-Omni 本地模型目录）和
+`dataset`（包含 worldsense_qa.json 与 videos/ 的 WorldSense 根目录）。下表仅列出额外资源：
+
+| 方法 | 方法配置 | resources.local.json 中需要的字段 | 用途 |
+| --- | --- | --- | --- |
+| baseline | configs/baseline.json | 无 | 不压缩，无辅助模型 |
+| random | configs/random.json | 无 | 随机删除 token，无辅助模型 |
+| OmniZip | configs/omnizip.json | 无 | 使用共享 Qwen 编码特征和注意力重要性 |
+| OmniPack | configs/omnipack.json | 无 | 使用共享 Qwen 编码特征和语言层特征 |
+| OmniSelect | configs/omniselect.json | `audioclip`、`nltk_data` | AudioCLIP 音视频相关性评分；NLTK 英文分词及词性标注 |
+| OmniScope | configs/omniscope.json | `clip_model` | CLIP 图文相关性评分；音频评分使用共享 Qwen，无额外音频模型 |
+
+只运行某一种方法时，不需要下载其他方法的辅助资源。若资源放在默认位置，也可以不填对应字段。
+`example.mp4` 不是统一 WorldSense 测试的依赖。
+
+### 配置示例与路径内容
+
+例如同时使用 OmniSelect 和 OmniScope，在项目根目录创建 `resources.local.json`：
+
+```json
+{
+  "audioclip": "/data/models/AudioCLIP/AudioCLIP-Full-Training.pt",
+  "clip_model": "/data/models/clip-vit-large-patch14-336",
+  "nltk_data": "assets/nltk_data"
+}
+```
+
+请替换为本机路径；Windows 可使用 `D:/Models/...`。该文件被 Git 忽略，每台机器单独配置。
+
+- `audioclip` 指向 **权重文件**，不是目录。默认 `resources/AudioCLIP-Full-Training.pt`。
+  AudioCLIP 的代码、词表和许可证已保留在 `vendor/audioclip/`，部署时仍需上传该目录。
+- `clip_model` 指向 **CLIP ViT-L/14@336 完整模型目录**，不是单个权重文件。
+  默认 `resources/clip-vit-large-patch14-336`；目录应包含权重、config.json、preprocessor_config.json
+  以及 tokenizer 所需配置、vocab.json、merges.txt 等文件。
+- `nltk_data` 指向 **NLTK 数据根目录**。默认 `assets/nltk_data`，内部需要
+  `tokenizers/punkt_tab/english/` 和 `taggers/averaged_perceptron_tagger_eng/`。
+  仅安装 Python 的 nltk 包不等于已经安装这些数据资源。
+
+辅助资源路径优先级：方法 `compression_params` 中的显式路径 > 环境变量
+`QWEN_AUDIOCLIP` / `QWEN_CLIP_MODEL` / `QWEN_NLTK_DATA` > `resources.local.json` > 默认路径。
+本地资源配置和环境变量中的相对路径以项目根目录为基准；为兼容旧配置，方法 JSON 中的显式路径仍以该 JSON 所在目录为基准。
+这些资源不会在评测时自动下载。
+
+设备设置仍属于方法配置：OmniSelect 使用 `audioclip_device`，OmniScope 使用 `clip_device`
+和 `clip_batch_size`。默认 CPU，显存足够时可将设备改为 `cuda`；无需因此更改资源路径。
+
+### 运行前检查
+
+在项目根目录、已安装项目依赖的 Python 环境中执行：
+
+```bash
+python -m compression.resources --method omniselect
+python -m compression.resources --method omniscope
+```
+
+按需运行对应命令，确认资源均显示 `OK`，再执行 `python app.py --config configs/方法名.json`。
+此检查只验证路径和必要文件布局，不加载模型，也不校验权重内容是否损坏；baseline、random、OmniZip、OmniPack 无需辅助资源检查。
+
 ## 启动
 
 ### 安装环境
